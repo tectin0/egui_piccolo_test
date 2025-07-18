@@ -13,7 +13,7 @@ pub struct TemplateApp {
 impl TemplateApp {
     pub fn new(_: &eframe::CreationContext<'_>) -> Self {
         let lua = Lua::full();
-        let code = "".to_string();
+        let code = String::default();
         let frame_history = FrameHistory::default();
 
         Self {
@@ -46,17 +46,22 @@ impl eframe::App for TemplateApp {
             let ex = lua.try_enter(|ctx| {
                 let lui = UserData::new::<Rootable![Lui<'_>]>(
                     &ctx,
-                    Lui(Gc::new(&ctx, Lock::new(ui as *const _ as u64))),
+                    Lui(Gc::new(&ctx, Lock::new(std::ptr::from_ref(ui) as u64))),
                 );
 
-                ctx.set_global("lui", lui).unwrap();
+                ctx.set_global("lui", lui)
+                    .expect("Failed to set global 'lui'");
 
                 let label = Callback::from_fn(&ctx, |_, _, mut stack| {
+                    #[expect(clippy::single_match_else)]
                     match stack[0] {
                         Value::UserData(ud) => {
-                            let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
+                            let ud = ud
+                                .downcast::<Rootable![Lui<'_>]>()
+                                .expect("Failed to downcast");
 
-                            let ui = unsafe { &mut *(ud.0.get() as *mut u64 as *mut egui::Ui) };
+                            // SAFETY: We know that `ud.0` is a `Lock<u64>` that points to an `egui::Ui`.
+                            let ui = unsafe { &mut *(ud.0.get() as *mut u64).cast::<egui::Ui>() };
 
                             let label = match stack.get(1) {
                                 Value::String(s) => s.to_string(),
@@ -77,14 +82,19 @@ impl eframe::App for TemplateApp {
                     Ok(CallbackReturn::Return)
                 });
 
-                ctx.set_global("label", label).unwrap();
+                ctx.set_global("label", label)
+                    .expect("Failed to set global 'label'");
 
                 let button = Callback::from_fn(&ctx, |_, _, mut stack| {
+                    #[expect(clippy::single_match_else)]
                     match stack[0] {
                         Value::UserData(ud) => {
-                            let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
+                            let ud = ud
+                                .downcast::<Rootable![Lui<'_>]>()
+                                .expect("Failed to downcast");
 
-                            let ui = unsafe { &mut *(ud.0.get() as *mut u64 as *mut egui::Ui) };
+                            // SAFETY: We know that `ud.0` is a `Lock<u64>` that points to an `egui::Ui`.
+                            let ui = unsafe { &mut *(ud.0.get() as *mut u64).cast::<egui::Ui>() };
 
                             let label = match stack.get(1) {
                                 Value::String(s) => s.to_string(),
@@ -95,7 +105,7 @@ impl eframe::App for TemplateApp {
                                 }
                             };
 
-                            let _ = ui.button(label);
+                            let _response = ui.button(label);
                         }
                         _ => panic!(),
                     };
@@ -108,7 +118,8 @@ impl eframe::App for TemplateApp {
                     ok
                 });
 
-                ctx.set_global("button", button).unwrap();
+                ctx.set_global("button", button)
+                    .expect("Failed to set global 'button'");
 
                 let env = ctx.globals();
 
@@ -122,20 +133,20 @@ impl eframe::App for TemplateApp {
             let ex = match ex {
                 Ok(ex) => ex,
                 Err(err) => {
-                    ui.label(format!("Error loading Lua code: {}", err));
+                    ui.label(format!("Error loading Lua code: {err}"));
                     return;
                 }
             };
 
-            let result = match lua.execute::<()>(&ex) {
+            match lua.execute::<()>(&ex) {
                 Ok(result) => result,
                 Err(err) => {
-                    ui.label(format!("Error executing Lua code: {}", err));
+                    ui.label(format!("Error executing Lua code: {err}"));
                     return;
                 }
             };
 
-            ui.label(format!("Lua code executed successfully: {:?}", result));
+            ui.label("Lua code executed successfully!");
         });
     }
 }
