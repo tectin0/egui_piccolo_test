@@ -1,109 +1,140 @@
-/// We derive Deserialize/Serialize so we can persist app state on shutdown.
-#[derive(serde::Deserialize, serde::Serialize)]
-#[serde(default)] // if we add new fields, give them default values when deserializing old state
+use anyhow::anyhow;
+use gc_arena::{Collect, Gc, Rootable, lock::Lock};
+use piccolo::{Callback, CallbackReturn, Closure, Executor, Lua, RuntimeError, UserData, Value};
+
+use crate::frame_history::FrameHistory;
+
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
-
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
-}
-
-impl Default for TemplateApp {
-    fn default() -> Self {
-        Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
-        }
-    }
+    code: String,
+    lua: Lua,
+    frame_history: FrameHistory,
 }
 
 impl TemplateApp {
-    /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // This is also where you can customize the look and feel of egui using
-        // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
+        let lua = Lua::full();
+        let code = "".to_string();
+        let frame_history = FrameHistory::default();
 
-        // Load previous app state (if any).
-        // Note that you must enable the `persistence` feature for this to work.
-        if let Some(storage) = cc.storage {
-            eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default()
-        } else {
-            Default::default()
+        Self {
+            code,
+            lua,
+            frame_history,
         }
     }
 }
 
+#[derive(Collect)]
+#[collect(no_drop)]
+struct Lui<'gc>(Gc<'gc, Lock<u64>>);
+
 impl eframe::App for TemplateApp {
-    /// Called by the framework to save state before shutdown.
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, self);
-    }
-
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
-
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
-
-            egui::MenuBar::new().ui(ui, |ui| {
-                // NOTE: no File->Quit on web pages!
-                let is_web = cfg!(target_arch = "wasm32");
-                if !is_web {
-                    ui.menu_button("File", |ui| {
-                        if ui.button("Quit").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                    });
-                    ui.add_space(16.0);
-                }
-
-                egui::widgets::global_theme_preference_buttons(ui);
-            });
-        });
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.frame_history
+            .on_new_frame(ctx.input(|i| i.time), frame.info().cpu_usage);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
+            self.frame_history.ui(ui);
+        });
 
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(&mut self.label);
+        egui::Window::new("Lua").show(ctx, |ui| {
+            ui.text_edit_multiline(&mut self.code);
+
+            let lua = &mut self.lua;
+
+            let ex = lua.try_enter(|ctx| {
+                let lui = UserData::new::<Rootable![Lui<'_>]>(
+                    &ctx,
+                    Lui(Gc::new(&ctx, Lock::new(ui as *const _ as u64))),
+                );
+
+                ctx.set_global("lui", lui).unwrap();
+
+                let label = Callback::from_fn(&ctx, |ctx, _, mut stack| {
+                    match stack[0] {
+                        Value::UserData(ud) => {
+                            let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
+
+                            let ui = unsafe { &mut *(ud.0.get() as *mut u64 as *mut egui::Ui) };
+
+                            let label = match stack.get(1) {
+                                Value::String(s) => s.to_string(),
+                                _ => {
+                                    return Err(piccolo::Error::Runtime(RuntimeError(
+                                        anyhow!("Expected a string for the label",).into(),
+                                    )));
+                                }
+                            };
+
+                            ui.label(label);
+                        }
+                        _ => panic!(),
+                    };
+
+                    stack.clear();
+
+                    Ok(CallbackReturn::Return)
+                });
+
+                ctx.set_global("label", label);
+
+                let button = Callback::from_fn(&ctx, |ctx, _, mut stack| {
+                    match stack[0] {
+                        Value::UserData(ud) => {
+                            let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
+
+                            let ui = unsafe { &mut *(ud.0.get() as *mut u64 as *mut egui::Ui) };
+
+                            let label = match stack.get(1) {
+                                Value::String(s) => s.to_string(),
+                                _ => {
+                                    return Err(piccolo::Error::Runtime(RuntimeError(
+                                        anyhow!("Expected a string for the button label",).into(),
+                                    )));
+                                }
+                            };
+
+                            ui.button(label);
+                        }
+                        _ => panic!(),
+                    };
+
+                    stack.clear();
+
+                    let ok: Result<CallbackReturn<'_>, piccolo::Error<'_>> =
+                        Ok(CallbackReturn::Return);
+
+                    ok
+                });
+
+                ctx.set_global("button", button);
+
+                let env = ctx.globals();
+
+                let closure = Closure::load_with_env(ctx, None, self.code.as_bytes(), env)?;
+
+                let ex = Executor::start(ctx, closure.into(), "this is my message");
+
+                Ok(ctx.stash(ex))
             });
 
-            ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                self.value += 1.0;
-            }
+            let ex = match ex {
+                Ok(ex) => ex,
+                Err(err) => {
+                    ui.label(format!("Error loading Lua code: {}", err));
+                    return;
+                }
+            };
 
-            ui.separator();
+            let result = match lua.execute::<()>(&ex) {
+                Ok(result) => result,
+                Err(err) => {
+                    ui.label(format!("Error executing Lua code: {}", err));
+                    return;
+                }
+            };
 
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/main/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
+            ui.label(format!("Lua code executed successfully: {:?}", result));
         });
     }
-}
-
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
 }
