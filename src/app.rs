@@ -11,7 +11,7 @@ pub struct TemplateApp {
 }
 
 impl TemplateApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(_: &eframe::CreationContext<'_>) -> Self {
         let lua = Lua::full();
         let code = "".to_string();
         let frame_history = FrameHistory::default();
@@ -35,6 +35,7 @@ impl eframe::App for TemplateApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.frame_history.ui(ui);
+            ui.label(format!("FPS: {:.2}", self.frame_history.fps()));
         });
 
         egui::Window::new("Lua").show(ctx, |ui| {
@@ -50,7 +51,7 @@ impl eframe::App for TemplateApp {
 
                 ctx.set_global("lui", lui).unwrap();
 
-                let label = Callback::from_fn(&ctx, |ctx, _, mut stack| {
+                let label = Callback::from_fn(&ctx, |_, _, mut stack| {
                     match stack[0] {
                         Value::UserData(ud) => {
                             let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
@@ -76,9 +77,9 @@ impl eframe::App for TemplateApp {
                     Ok(CallbackReturn::Return)
                 });
 
-                ctx.set_global("label", label);
+                ctx.set_global("label", label).unwrap();
 
-                let button = Callback::from_fn(&ctx, |ctx, _, mut stack| {
+                let button = Callback::from_fn(&ctx, |_, _, mut stack| {
                     match stack[0] {
                         Value::UserData(ud) => {
                             let ud = ud.downcast::<Rootable![Lui<'_>]>().unwrap();
@@ -94,7 +95,7 @@ impl eframe::App for TemplateApp {
                                 }
                             };
 
-                            ui.button(label);
+                            let _ = ui.button(label);
                         }
                         _ => panic!(),
                     };
@@ -107,7 +108,7 @@ impl eframe::App for TemplateApp {
                     ok
                 });
 
-                ctx.set_global("button", button);
+                ctx.set_global("button", button).unwrap();
 
                 let env = ctx.globals();
 
